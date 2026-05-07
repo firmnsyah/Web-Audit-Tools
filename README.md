@@ -11,7 +11,7 @@ Two standalone Python scripts for auditing your own website: one checks for brok
 ### Clone the repository
 
 ```bash
-git clone https://github.com/<username>/web-audit-tools.git
+git clone https://github.com/frmnsyah/web-audit-tools.git
 cd web-audit-tools
 ```
 
