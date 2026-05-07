@@ -1,0 +1,9 @@
+severity,category,title,detail,url,evidence,cwe,recommendation
+critical,HTTP Methods,PUT method accepts file upload to random path,PUT /__audit_put_probe_85744a27.txt returned 200 — server may accept arbitrary files.,https://bmkg.go.id/__audit_put_probe_85744a27.txt, PUT /__audit_put_probe_85744a27.txt → 200,CWE-434,"Disable PUT, or restrict to authenticated/authorized paths only."
+medium,Headers,CSP allows 'unsafe-eval',eval() and Function() constructor allowed.,https://bmkg.go.id/,,CWE-95,Avoid eval-based libraries; remove unsafe-eval.
+medium,Headers,CSP allows 'unsafe-inline',Inline scripts/styles allowed — defeats most XSS protection.,https://bmkg.go.id/,,CWE-79,Use nonces/hashes; remove 'unsafe-inline'.
+medium,Headers,HSTS max-age too short,max-age=15552000 (less than 6 months),https://bmkg.go.id/,,,Set max-age=31536000 (1 year) once you're confident.
+info,Recon,robots.txt accessible,Size: 390782 bytes,https://bmkg.go.id/robots.txt,,,Review for unintentionally listed admin paths.
+info,Recon,sitemap.xml accessible,Size: 390782 bytes,https://bmkg.go.id/sitemap.xml,,,Review for unintentionally listed admin paths.
+info,Recon,sitemap_index.xml accessible,Size: 390782 bytes,https://bmkg.go.id/sitemap_index.xml,,,Review for unintentionally listed admin paths.
+info,TLS,HTTP -> HTTPS redirect OK,HTTP request redirects to https://www.bmkg.go.id/,http://bmkg.go.id/,,,No action needed.

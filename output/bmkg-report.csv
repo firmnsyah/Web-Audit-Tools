@@ -1,0 +1,8 @@
+severity,category,title,detail,url,recommendation
+medium,Headers,CSP allows 'unsafe-eval',eval() and Function() constructor allowed.,https://bmkg.go.id/,Avoid eval-based libraries; remove unsafe-eval directive.
+medium,Headers,CSP allows 'unsafe-inline',Inline scripts/styles allowed — defeats most XSS protection.,https://bmkg.go.id/,"Move inline scripts to external files, use nonces/hashes."
+medium,Headers,HSTS max-age too short,max-age=15552000 (less than 6 months),https://bmkg.go.id/,Set max-age=31536000 (1 year) once you're confident.
+info,Recon,robots.txt accessible,Size: 389373 bytes,https://bmkg.go.id/robots.txt,Review for unintentionally listed admin paths.
+info,Recon,sitemap.xml accessible,Size: 389373 bytes,https://bmkg.go.id/sitemap.xml,Review for unintentionally listed admin paths.
+info,Recon,sitemap_index.xml accessible,Size: 389373 bytes,https://bmkg.go.id/sitemap_index.xml,Review for unintentionally listed admin paths.
+info,TLS,HTTP -> HTTPS redirect OK,HTTP request redirects to https://www.bmkg.go.id/,http://bmkg.go.id/,No action needed.
