@@ -1,0 +1,7 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+tldextract>=5.0.0
+
+# Optional — only needed for --spa flag (JS-rendered sites)
+# After install, run: playwright install chromium
+playwright>=1.40.0
