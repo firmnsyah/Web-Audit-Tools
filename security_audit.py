@@ -21,6 +21,7 @@ NOT auto-tested (require manual / specialized work):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import hashlib
 import importlib.util
@@ -33,6 +34,7 @@ import time
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from threading import Lock
 from typing import Callable, List, Optional, Sequence
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -66,7 +68,7 @@ PASSIVE_CHECKS = {
     "csrf", "admin", "errors", "methods", "host",
 }
 DEEP_CHECKS = {"files", "keys", "wordpress", "dirs"}
-ACTIVE_CHECKS = {"xss", "sqli", "ssti", "lfi", "redirect", "ssrf", "jsonp"}
+ACTIVE_CHECKS = {"xss", "sqli", "ssti", "lfi", "cmdi", "traversal", "redirect", "ssrf", "jsonp"}
 ALL_CHECKS = PASSIVE_CHECKS | DEEP_CHECKS | ACTIVE_CHECKS
 
 
@@ -236,6 +238,77 @@ def _extract_title(text: str) -> str:
 def _trim(s: str, n: int = 120) -> str:
     s = " ".join(s.split())
     return s if len(s) <= n else s[:n - 1] + "…"
+
+
+# =============================================================================
+# Payload loader — reads from payload/ directory, falls back to builtins
+# =============================================================================
+
+def _load_payload_file(path: Path) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        return []
+
+
+def _load_payload_dir(rel: str, base: Path,
+                      pick: Optional[list[str]] = None) -> list[str]:
+    """Load all .txt/.fuzz files under base/rel, deduped, capped at 500."""
+    d = base / rel
+    if not d.is_dir():
+        return []
+    raw: list[str] = []
+    for ext in ("*.txt", "*.fuzz"):
+        for p in sorted(d.rglob(ext)):
+            if pick and p.name not in pick:
+                continue
+            raw.extend(_load_payload_file(p))
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in raw:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out[:500]
+
+
+def init_payloads(payload_base: Path) -> None:
+    """Replace built-in payload lists with content from the payload/ directory."""
+    global XSS_PAYLOADS, SQLI_PAYLOADS, LFI_PAYLOADS, CMDI_PAYLOADS, TRAVERSAL_PAYLOADS
+
+    xss = _load_payload_dir("XSS Injection/Intruders", payload_base,
+                             pick=["xss_payloads_quick.txt", "XSSDetection.txt",
+                                   "XSS_Polyglots.txt", "JHADDIX_XSS.txt"])
+    if xss:
+        XSS_PAYLOADS = xss
+        logger.debug("XSS payloads: %d loaded from files", len(XSS_PAYLOADS))
+
+    sqli = _load_payload_dir("SQL Injection/Intruder", payload_base,
+                              pick=["Generic_Fuzz.txt", "Generic_ErrorBased.txt",
+                                    "SQLi_Polyglots.txt", "Auth_Bypass.txt"])
+    if sqli:
+        SQLI_PAYLOADS = sqli
+        logger.debug("SQLi payloads: %d loaded from files", len(SQLI_PAYLOADS))
+
+    lfi = _load_payload_dir("File Inclusion/Intruders", payload_base,
+                             pick=["JHADDIX_LFI.txt", "simple-check.txt",
+                                   "Linux-files.txt", "Windows-files.txt"])
+    if lfi:
+        LFI_PAYLOADS = lfi
+        logger.debug("LFI payloads: %d loaded from files", len(LFI_PAYLOADS))
+
+    cmdi = _load_payload_dir("Command Injection/Intruder", payload_base)
+    if cmdi:
+        CMDI_PAYLOADS = cmdi
+        logger.debug("CMDi payloads: %d loaded from files", len(CMDI_PAYLOADS))
+
+    traversal = _load_payload_dir("Directory Traversal/Intruder", payload_base,
+                                   pick=["directory_traversal.txt", "deep_traversal.txt",
+                                         "traversals-8-deep-exotic-encoding.txt"])
+    if traversal:
+        TRAVERSAL_PAYLOADS = traversal
+        logger.debug("Traversal payloads: %d loaded from files", len(TRAVERSAL_PAYLOADS))
 
 
 def fingerprint_baseline(ctx: ScanContext) -> Baseline:
@@ -545,6 +618,40 @@ _JSONP_REFLECTION = re.compile(rf"\b{re.escape(_JSONP_MARKER)}\s*\(", re.I)
 
 # JWT detection: base64url-encoded header.payload.signature
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
+
+# --- Command injection ---
+CMDI_PAYLOADS: list[str] = [
+    ";id", "||id", "|id", "&id", "&&id", ";id;", "|id|",
+    ";whoami", "&&whoami", "\nid\n", "%0aid", "`id`",
+    ";ls", "||ls", ";cat /etc/passwd",
+]
+CMDI_HIT_PATTERNS = [
+    re.compile(r"uid=\d+\(\w+\)\s+gid=\d+", re.I),
+    re.compile(r"root:[x*!]?:0:0:"),
+    re.compile(r"(?:^|\s)www-data(?:\s|$)", re.I),
+    re.compile(r"(?:total \d+\n|drwx)", re.M),   # ls output
+]
+
+# --- Directory traversal ---
+TRAVERSAL_PAYLOADS: list[str] = [
+    "../../../etc/passwd",
+    "../../../../etc/passwd",
+    "../../../../../etc/passwd",
+    "../../../../../../etc/passwd",
+    "..\\..\\..\\windows\\win.ini",
+    "..\\..\\..\\..\\windows\\win.ini",
+    "%2e%2e%2f%2e%2e%2fetc/passwd",
+    "%2e%2e/%2e%2e/%2e%2e/etc/passwd",
+    "....//....//....//etc/passwd",
+    "..%252f..%252f..%252fetc/passwd",
+    "/etc/passwd",
+    "C:/windows/win.ini",
+]
+TRAVERSAL_HIT_PATTERNS = [
+    re.compile(r"root:[x*!]?:0:0:"),
+    re.compile(r"\[(?:fonts|extensions|mci\s+extensions)\]", re.I),
+    re.compile(r"daemon:[x*]?:\d+:\d+:"),
+]
 
 
 # =============================================================================
@@ -983,7 +1090,8 @@ def check_csrf_forms(ctx: ScanContext, max_pages: int) -> List[Finding]:
     base_netloc = urlparse(ctx.base_url).netloc
     visited: set[str] = set()
     queue: deque[str] = deque([ctx.base_url])
-    flagged: set[str] = set()
+    # Key: (frozenset of input names, action path) — same template across pages = 1 finding
+    flagged: set[tuple] = set()
 
     while queue and len(visited) < max_pages:
         page_url = queue.popleft()
@@ -1001,8 +1109,6 @@ def check_csrf_forms(ctx: ScanContext, max_pages: int) -> List[Finding]:
                 continue
             action = _attr_str(form, "action")
             form_id = urljoin(page_url, action) if action else page_url
-            if form_id in flagged:
-                continue
             input_names = [
                 _attr_str(inp, "name").lower()
                 for inp in form.find_all(["input", "textarea", "select"])
@@ -1013,12 +1119,16 @@ def check_csrf_forms(ctx: ScanContext, max_pages: int) -> List[Finding]:
             )
             if has_token:
                 continue
-            flagged.add(form_id)
+            # Deduplicate by form structure + action path (same template on N pages = 1 finding)
+            form_key = (frozenset(input_names), urlparse(form_id).path)
+            if form_key in flagged:
+                continue
+            flagged.add(form_key)
             out.append(Finding(
                 severity="medium", category="CSRF",
                 title="POST form without CSRF token",
-                detail=f"Form action='{action or '(self)'}' on {page_url} "
-                       f"has no anti-CSRF token field.",
+                detail=f"Form action='{action or '(self)'}' — "
+                       f"no anti-CSRF token field detected.",
                 recommendation="Add a per-session CSRF token; validate server-side; "
                                "use SameSite=Lax cookies.",
                 url=form_id, cwe="CWE-352",
@@ -1206,6 +1316,43 @@ def _run_parallel(ctx: ScanContext, inputs: Sequence[InputPoint],
             except Exception as e:
                 logger.debug("worker raised: %s", e)
     return results
+
+
+async def _run_active_async(ctx: ScanContext, inputs: List[InputPoint],
+                            active_checks: set) -> None:
+    """Run all active check categories concurrently via asyncio + thread executor."""
+    check_map: dict[str, Callable] = {
+        "xss":       check_xss,
+        "sqli":      check_sqli,
+        "ssti":      check_ssti,
+        "lfi":       check_lfi,
+        "cmdi":      check_cmdi,
+        "traversal": check_traversal,
+        "redirect":  check_open_redirect,
+        "ssrf":      check_ssrf,
+        "jsonp":     check_jsonp,
+    }
+    to_run = [(cid, fn) for cid, fn in check_map.items()
+              if cid in active_checks and ctx.should_run(cid)]
+    if not to_run:
+        return
+
+    loop = asyncio.get_running_loop()
+
+    async def _one(cid: str, fn: Callable) -> tuple:
+        logger.info("  [ASYNC:%s] started", cid.upper())
+        findings: List[Finding] = await loop.run_in_executor(None, fn, ctx, inputs)
+        return cid, findings
+
+    tasks = [asyncio.ensure_future(_one(cid, fn)) for cid, fn in to_run]
+    logger.info("Running %d active check(s) asynchronously...", len(tasks))
+    for coro in asyncio.as_completed(tasks):
+        cid, findings = await coro
+        if findings:
+            ctx.add(*findings)
+            logger.info("  [ASYNC:%s] %d finding(s)", cid.upper(), len(findings))
+        else:
+            logger.info("  [ASYNC:%s] clean", cid.upper())
 
 
 # --- XSS ---
@@ -1423,12 +1570,70 @@ def check_jsonp(ctx: ScanContext, inputs: Sequence[InputPoint]) -> List[Finding]
     return _run_parallel(ctx, candidates, worker)
 
 
+# --- Command injection ---
+
+def check_cmdi(ctx: ScanContext, inputs: Sequence[InputPoint]) -> List[Finding]:
+    def worker(ip: InputPoint) -> list[Finding]:
+        baseline_resp = _probe(ctx, ip, ip.params.get(ip.fuzz_param) or "test")
+        baseline_text = baseline_resp.text if baseline_resp else ""
+        for payload in CMDI_PAYLOADS:
+            resp = _probe(ctx, ip, payload)
+            if resp is None:
+                continue
+            for pat in CMDI_HIT_PATTERNS:
+                m = pat.search(resp.text)
+                if m and not pat.search(baseline_text):
+                    return [Finding(
+                        severity="critical", category="Command Injection",
+                        title=f"OS command injection via '{ip.fuzz_param}'",
+                        detail=f"{ip.method} {ip.url} executes OS commands unsanitized.",
+                        recommendation="Never pass user input to shell commands. "
+                                       "Use language-native APIs; validate with strict allowlists.",
+                        url=ip.url, cwe="CWE-78",
+                        evidence=f"payload={_trim(payload, 60)} → {_trim(m.group(0), 60)}",
+                    )]
+        return []
+    return _run_parallel(ctx, inputs, worker)
+
+
+# --- Directory traversal ---
+
+def check_traversal(ctx: ScanContext, inputs: Sequence[InputPoint]) -> List[Finding]:
+    def worker(ip: InputPoint) -> list[Finding]:
+        baseline_resp = _probe(ctx, ip, ip.params.get(ip.fuzz_param) or "test")
+        baseline_text = baseline_resp.text if baseline_resp else ""
+        for payload in TRAVERSAL_PAYLOADS:
+            resp = _probe(ctx, ip, payload)
+            if resp is None:
+                continue
+            for pat in TRAVERSAL_HIT_PATTERNS:
+                m = pat.search(resp.text)
+                if m and not pat.search(baseline_text):
+                    return [Finding(
+                        severity="critical", category="Path Traversal",
+                        title=f"Directory traversal via '{ip.fuzz_param}'",
+                        detail=f"Parameter allows reading arbitrary files outside webroot.",
+                        recommendation="Validate file paths against an allowlist. "
+                                       "Use realpath() and verify path stays within webroot.",
+                        url=ip.url, cwe="CWE-22",
+                        evidence=f"payload={_trim(payload, 60)} → {_trim(m.group(0), 40)}",
+                    )]
+        return []
+    return _run_parallel(ctx, inputs, worker)
+
+
 # =============================================================================
 # Orchestration
 # =============================================================================
 
-def run_audit(ctx: ScanContext, deep: bool, active: bool,
-              max_crawl_pages: int) -> None:
+def run_audit(ctx: ScanContext, deep: bool, active_checks: set,
+              max_crawl_pages: int, concurrent: bool = False) -> None:
+    """
+    active_checks: set of check IDs to run (subset of ACTIVE_CHECKS).
+                   Empty set = no active scanning.
+    concurrent:    if True, run all active checks in parallel via asyncio.
+    """
+    active = bool(active_checks)
     step = 0
 
     def step_log(label: str) -> None:
@@ -1522,39 +1727,44 @@ def run_audit(ctx: ScanContext, deep: bool, active: bool,
     if active:
         step_log(f"Discovering input parameters (up to {max_crawl_pages} pages)")
         inputs = discover_inputs(ctx, max_crawl_pages)
+        n = len(_dedup(inputs))
 
         if inputs:
-            checks: list[tuple[str, str, Callable]] = [
-                ("xss", "Reflected XSS", check_xss),
-                ("sqli", "SQL injection (error + boolean)", check_sqli),
-                ("ssti", "Server-Side Template Injection", check_ssti),
-                ("lfi", "Local File Inclusion / path traversal", check_lfi),
-                ("redirect", "Open redirect", check_open_redirect),
-                ("ssrf", "Server-Side Request Forgery", check_ssrf),
-                ("jsonp", "JSONP callback reflection", check_jsonp),
-            ]
-            for cid, label, fn in checks:
-                if not ctx.should_run(cid):
-                    continue
-                step_log(f"{label} ({len(_dedup(inputs))} input[s], "
-                         f"{ctx.threads} thread[s])")
-                ctx.add(*fn(ctx, inputs))
+            if concurrent:
+                step_log(f"Running {len(active_checks)} active check(s) ASYNC "
+                         f"({n} input[s], {ctx.threads} thread[s])")
+                asyncio.run(_run_active_async(ctx, inputs, active_checks))
+            else:
+                check_map: list[tuple[str, str, Callable]] = [
+                    ("xss",       "Reflected XSS",                  check_xss),
+                    ("sqli",      "SQL injection (error + boolean)", check_sqli),
+                    ("ssti",      "Server-Side Template Injection",  check_ssti),
+                    ("lfi",       "Local File Inclusion",            check_lfi),
+                    ("cmdi",      "Command Injection",               check_cmdi),
+                    ("traversal", "Directory Traversal",             check_traversal),
+                    ("redirect",  "Open redirect",                   check_open_redirect),
+                    ("ssrf",      "Server-Side Request Forgery",     check_ssrf),
+                    ("jsonp",     "JSONP callback reflection",       check_jsonp),
+                ]
+                for cid, label, fn in check_map:
+                    if cid not in active_checks or not ctx.should_run(cid):
+                        continue
+                    step_log(f"{label} ({n} input[s], {ctx.threads} thread[s])")
+                    ctx.add(*fn(ctx, inputs))
 
         ctx.add(Finding(
             severity="info", category="Manual Review",
             title="Vulnerability classes not auto-tested",
             detail="The following require specialized testing: "
-                   "RCE (probes too dangerous to run unattended), XXE (needs XML "
-                   "endpoints with custom payloads), IDOR / access control "
-                   "(requires authenticated comparison across user roles), "
-                   "Authentication bypass (requires valid session manipulation).",
-            recommendation="Use authenticated tools (Burp, ZAP) with multiple test users "
-                           "for IDOR/auth. Audit server-side code for command exec, XML "
-                           "parsers, and auth flows.",
+                   "RCE (too dangerous to run unattended), XXE (needs XML endpoints "
+                   "with custom payloads), IDOR / access control (requires comparison "
+                   "across roles), Authentication bypass (requires session manipulation).",
+            recommendation="Use Burp Suite / OWASP ZAP with multiple test accounts for "
+                           "IDOR/auth. Audit server code for exec(), eval(), XML parsers.",
             url=ctx.base_url,
         ))
     else:
-        logger.info("[active] Skipped active vulnerability scanning (use --active)")
+        logger.info("[active] Skipped active scanning — use individual flags or --all-active")
 
 
 # =============================================================================
@@ -1627,7 +1837,8 @@ def main() -> int:
                     "private keys / HTTP methods / host header / misconfig.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("url", help="Base URL (e.g. https://example.com)")
+    parser.add_argument("url", nargs="?", default="",
+                        help="Base URL (e.g. https://example.com)")
     parser.add_argument("--timeout", type=int, default=10, help="Request timeout (s)")
     parser.add_argument("--delay", type=float, default=0.1,
                         help="Delay between requests (s)")
@@ -1640,8 +1851,29 @@ def main() -> int:
     parser.add_argument("--deep", action="store_true",
                         help="Probe sensitive files, private keys, dir listings")
     parser.add_argument("--active", action="store_true",
-                        help="Send active probes (XSS/SQLi/SSTI/LFI/SSRF/redirect/JSONP). "
-                             "USE ONLY WITH PERMISSION.")
+                        help="Run ALL active checks sequentially (XSS/SQLi/SSTI/LFI/CMDi/"
+                             "Traversal/SSRF/Redirect/JSONP). USE ONLY WITH PERMISSION.")
+    parser.add_argument("--all-active", action="store_true",
+                        help="Run ALL active checks concurrently (async). "
+                             "Same as --active but parallel. USE ONLY WITH PERMISSION.")
+
+    # Individual active check flags
+    _active_flags = [
+        ("--xss",       "Run XSS (Cross-Site Scripting) check"),
+        ("--sqli",      "Run SQL injection check"),
+        ("--ssti",      "Run Server-Side Template Injection check"),
+        ("--lfi",       "Run Local File Inclusion check"),
+        ("--cmdi",      "Run OS Command Injection check"),
+        ("--traversal", "Run Directory Traversal check"),
+        ("--redirect",  "Run Open Redirect check"),
+        ("--ssrf",      "Run Server-Side Request Forgery check"),
+        ("--jsonp",     "Run JSONP callback reflection check"),
+    ]
+    for flag, help_text in _active_flags:
+        parser.add_argument(flag, action="store_true", help=help_text)
+
+    parser.add_argument("--payload-dir", default="payload",
+                        help="Directory containing payload wordlists (default: payload/)")
     parser.add_argument("--cookie", action="append", default=[], metavar="NAME=VALUE",
                         help="Add cookie (repeatable). Useful for auth'd scanning.")
     parser.add_argument("--header", action="append", default=[], metavar="NAME: VALUE",
@@ -1685,6 +1917,29 @@ def main() -> int:
         print("--only resolved to empty set — nothing to run", file=sys.stderr)
         return 1
 
+    # Determine active checks to run
+    _individual = {"xss", "sqli", "ssti", "lfi", "cmdi", "traversal",
+                   "redirect", "ssrf", "jsonp"}
+    enabled_by_flag = {c for c in _individual if getattr(args, c, False)}
+    concurrent = getattr(args, "all_active", False)
+    if args.active or concurrent:
+        active_checks = _individual.copy()
+    else:
+        active_checks = enabled_by_flag
+    # Apply --skip / --only on top of active_checks
+    if only is not None:
+        active_checks &= only
+    else:
+        active_checks -= skip
+
+    # Load payloads from directory
+    payload_base = Path(args.payload_dir)
+    if payload_base.is_dir():
+        init_payloads(payload_base)
+        logger.info("Payloads loaded from: %s", payload_base.resolve())
+    else:
+        logger.info("Payload directory not found (%s) — using built-in payloads", args.payload_dir)
+
     session = build_session(args.cookie, args.header, args.bearer, args.proxy)
     ctx = ScanContext(
         session=session, base_url=args.url,
@@ -1696,20 +1951,21 @@ def main() -> int:
     modes = []
     if args.deep:
         modes.append("DEEP")
-    if args.active:
-        modes.append("ACTIVE")
+    if active_checks:
+        tag = "ASYNC" if concurrent else "ACTIVE"
+        modes.append(f"{tag}[{','.join(sorted(active_checks))}]")
     print(f"Auditing: {args.url}")
     print(f"Mode: {' + '.join(modes) if modes else 'STANDARD'} | "
           f"threads={args.threads} delay={args.delay} budget={args.max_requests}")
     if args.proxy:
         print(f"Proxy  : {_normalize_proxy(args.proxy)}  "
               f"(server logs will show this IP, not yours)")
-    if args.active:
+    if active_checks:
         print("\n!! ACTIVE mode sends probe payloads. Use only with permission. !!\n")
 
     interrupted = False
     try:
-        run_audit(ctx, args.deep, args.active, args.max_crawl_pages)
+        run_audit(ctx, args.deep, active_checks, args.max_crawl_pages, concurrent)
     except KeyboardInterrupt:
         interrupted = True
         print("\n[INTERRUPTED] Saving findings collected so far...", file=sys.stderr)
