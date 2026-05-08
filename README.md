@@ -215,30 +215,38 @@ python security_audit.py https://example.com
 # Deep scan (also probes sensitive paths)
 python security_audit.py https://example.com --deep
 
-# Active scan (sends payloads — use only with permission)
+# Run a specific active check only
+python security_audit.py https://example.com --xss
+python security_audit.py https://example.com --sqli
+python security_audit.py https://example.com --lfi
+python security_audit.py https://example.com --cmdi
+python security_audit.py https://example.com --traversal
+
+# Combine individual checks
+python security_audit.py https://example.com --xss --sqli --ssti
+
+# Run ALL active checks sequentially
 python security_audit.py https://example.com --active
 
-# Full scan with auth
-python security_audit.py https://example.com --deep --active \
-  --cookie "session=abc123" --bearer "eyJ..."
+# Run ALL active checks concurrently (async — fastest)
+python security_audit.py https://example.com --all-active
 
-# Run only specific checks
-python security_audit.py https://example.com --active --only xss,sqli
+# Full scan with auth + custom payload directory
+python security_audit.py https://example.com --deep --all-active \
+  --cookie "session=abc123" --bearer "eyJ..." \
+  --payload-dir payload/
 
 # Skip specific checks
-python security_audit.py https://example.com --skip methods,host
+python security_audit.py https://example.com --active --skip methods,host
 
 # List all available check IDs
 python security_audit.py https://example.com --list-checks
 
 # JSON output in addition to CSV
-python security_audit.py https://example.com --deep --active --json output/report.json
+python security_audit.py https://example.com --deep --all-active --json output/report.json
 
 # Route through a local proxy (see which IP your server logs)
 python security_audit.py https://example.com --proxy http://127.0.0.1:8080
-
-# Route through SOCKS5 (e.g. Tor)
-python security_audit.py https://example.com --proxy socks5://127.0.0.1:1080
 ```
 
 ### Options
@@ -251,7 +259,18 @@ python security_audit.py https://example.com --proxy socks5://127.0.0.1:1080
 | `--max-requests`         | `2000`                      | Global HTTP request budget (safety cap)                      |
 | `--max-crawl-pages`      | `15`                        | Pages to crawl for CSRF/admin/input discovery                |
 | `--deep`                 | off                         | Probe sensitive files, private keys, dir listings            |
-| `--active`               | off                         | Send active payloads (XSS/SQLi/SSTI/LFI/SSRF/redirect/JSONP) |
+| `--active`               | off                         | Run ALL active checks sequentially                           |
+| `--all-active`           | off                         | Run ALL active checks **concurrently** (async, fastest)      |
+| `--xss`                  | off                         | Run XSS check only                                           |
+| `--sqli`                 | off                         | Run SQL injection check only                                 |
+| `--ssti`                 | off                         | Run SSTI check only                                          |
+| `--lfi`                  | off                         | Run Local File Inclusion check only                          |
+| `--cmdi`                 | off                         | Run OS Command Injection check only                          |
+| `--traversal`            | off                         | Run Directory Traversal check only                           |
+| `--redirect`             | off                         | Run Open Redirect check only                                 |
+| `--ssrf`                 | off                         | Run SSRF check only                                          |
+| `--jsonp`                | off                         | Run JSONP callback check only                                |
+| `--payload-dir`          | `payload/`                  | Path to payload wordlist directory                           |
 | `--cookie NAME=VALUE`    | —                           | Add a cookie (repeatable)                                    |
 | `--header "Name: Value"` | —                           | Add an HTTP header (repeatable)                              |
 | `--bearer TOKEN`         | —                           | Set `Authorization: Bearer` header                           |
@@ -288,6 +307,8 @@ Use these with `--skip` or `--only`:
 | `sqli`        | active  | SQL Injection                         |
 | `ssti`        | active  | Server-Side Template Injection        |
 | `lfi`         | active  | Local File Inclusion                  |
+| `cmdi`        | active  | OS Command Injection                  |
+| `traversal`   | active  | Directory Traversal                   |
 | `redirect`    | active  | Open Redirect                         |
 | `ssrf`        | active  | Server-Side Request Forgery           |
 | `jsonp`       | active  | JSONP callback reflection             |
